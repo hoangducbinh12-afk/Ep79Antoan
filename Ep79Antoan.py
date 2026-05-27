@@ -7,166 +7,124 @@ import re
 from PIL import Image
 from collections import Counter
 
-# --- 1. CẤU HÌNH HỆ THỐNG ---
+# --- 1. CẤU HÌNH & MAPPING ---
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['en'])
 
 def get_mapping_v11(full_str, total_pos=107):
     if not full_str or len(full_str) < total_pos:
+        # Nếu chưa có chuỗi 107 vị trí, dùng tạm mapping mặc định để không lỗi code
         return {str(i): f"{i % 100:02d}" for i in range(11449)}
     return {str(i * total_pos + j): f"{full_str[i]}{full_str[j]}" for i in range(total_pos) for j in range(total_pos)}
 
-def calculate_tier(losses, threshold_pct):
-    if not losses: return 0
-    losses_sorted = sorted(losses, reverse=True)
-    idx = int(len(losses_sorted) * (threshold_pct / 100)) - 1
-    return losses_sorted[max(0, idx)]
-
-# Hàm cập nhật trạng thái ma trận (Score, Streak, History)
-def update_matrix_state(db, results_27, mapping):
-    for wire_id, w_data in db.items():
-        num = mapping.get(str(wire_id))
-        if num in results_27:
-            w_data["streak_win"] = w_data.get("streak_win", 0) + 1
-            w_data["streak_loss"] = 0
-            w_data["score"] = w_data.get("score", 1000.0) - 2.7
-            hist = w_data.get("hit_history", [0]*20); hist.append(1)
-            w_data["hit_history"] = hist[-20:]
-        else:
-            w_data["streak_loss"] = w_data.get("streak_loss", 0) + 1
-            w_data["streak_win"] = 0
-            w_data["score"] = w_data.get("score", 1000.0) + 1.0
-            hist = w_data.get("hit_history", [0]*20); hist.append(0)
-            w_data["hit_history"] = hist[-20:]
-
-# --- 2. LOGIC QUÉT 5 CHẠM TỪ ĐÁY RANK ---
-def get_bottom_5_chạm_v13(df_full):
-    if df_full.empty: return ['?']*5
-    df_sorted = df_full.sort_values("Rank", ascending=False)
-    low_digits = []
-    for _, row in df_sorted.iterrows():
-        num_str = str(row['Số'])
-        for char in num_str:
-            if char not in low_digits: low_digits.append(char)
-            if len(low_digits) == 5: return sorted(low_digits)
-    return sorted(low_digits)
-
-# --- 3. BỘ NÃO HẠ DÀN V13.8 ---
-def thermal_ai_engines_v80(df_raw, history, db, mapping, cfg):
-    if df_raw is None or df_raw.empty: 
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), df_raw, []
+# --- 2. LOGIC TÍNH RANK & NHẶT 5 CHẠM ĐÁY (NHÂN VẬT CHÍNH) ---
+def get_matrix_df_v13(db, last_full_str, t_val=68, w_val=10):
+    if not db or not last_full_str: return pd.DataFrame()
+    mapping = get_mapping_v11(last_full_str)
+    stats = {f"{i:02d}": {"total_score": 0.0, "clean_wire_count": 0} for i in range(100)}
     
-    low_5 = get_bottom_5_chạm_v13(df_raw)
-    df_raw['is_low_touch'] = df_raw['Số'].apply(lambda x: any(d in x for d in low_5)).astype(int)
-    df_raw['is_golden_core'] = ((df_raw['Tang'] == 1) & (df_raw['An'].isin([2, 3]))).astype(int)
+    for wid, wd in db.items():
+        num = mapping.get(str(wid))
+        if num:
+            if wd.get("streak_win", 0) == 0:
+                stats[num]["clean_wire_count"] += 1
+                stats[num]["total_score"] += float(wd.get("score", 1000.0))
     
-    # Tính Safety Score
-    df_raw['safety_score_79'] = (df_raw['is_golden_core'] * 150) + (df_raw['is_low_touch'] * 100)
+    res = []
+    for num, s in stats.items():
+        score = round(s["total_score"] / max(1, s["clean_wire_count"]), 2)
+        res.append({"Số": num, "Điểm": score})
     
-    ds_79 = df_raw.sort_values(by=['safety_score_79', 'Điểm'], ascending=[False, False]).head(79)
-    da_59 = ds_79.sort_values(by=['Điểm'], ascending=False).head(59)
-    dk_39 = da_59.sort_values(by=['is_low_touch', 'is_golden_core'], ascending=[False, False]).head(39)
-    
-    return dk_39, da_59, ds_79, df_raw, low_5
+    df = pd.DataFrame(res).sort_values("Điểm", ascending=False).reset_index(drop=True)
+    df["Rank"] = df.index + 1
+    return df
 
-# --- 4. GIAO DIỆN CHÍNH ---
-st.set_page_config(layout="wide", page_title="Matrix V13.8 Stable")
-st.title("🛡️ Matrix V13.8 - Bottom Scan (Full History)")
+def get_low_5_realtime(df_rank):
+    if df_rank.empty: return ["?"]*5
+    # Quét từ Rank 100 ngược lên
+    df_bottom = df_rank.sort_values("Rank", ascending=False)
+    digits = []
+    for s in df_bottom["Số"]:
+        for char in s:
+            if char not in digits: digits.append(char)
+            if len(digits) == 5: return sorted(digits)
+    return sorted(digits)
+
+# --- 3. GIAO DIỆN ---
+st.set_page_config(layout="wide", page_title="Matrix V13.85")
+st.title("🛡️ Matrix V13.85 - Real-time Bottom Scan")
 
 if 'db' not in st.session_state: st.session_state['db'] = {}
 if 'history' not in st.session_state: st.session_state['history'] = []
 if 'last_full_str' not in st.session_state: st.session_state['last_full_str'] = ""
-if 'cfg' not in st.session_state: st.session_state['cfg'] = {"tier": 68, "win": 10, "bot": 40, "bet": 40}
 
-# --- SIDEBAR: DỮ LIỆU & OCR ---
+# --- SIDEBAR: OCR & LƯU ---
 with st.sidebar:
-    st.header("📂 1. DỮ LIỆU")
-    up_json = st.file_uploader("Nạp JSON", type=['json'])
-    if up_json and st.button("XÁC NHẬN NẠP"):
-        data = json.load(up_json)
-        st.session_state['db'] = data.get('matrix', {})
-        st.session_state['history'] = data.get('history', [])
-        st.session_state['last_full_str'] = data.get('last_full_str', "")
-        st.rerun()
-
-    st.header("📸 2. QUÉT KQ (OCR)")
-    up_img = st.file_uploader("Ảnh KQ", type=['jpg', 'png', 'jpeg'])
+    st.header("📸 QUÉT KẾT QUẢ")
+    up_img = st.file_uploader("Upload ảnh KQ", type=['jpg','png'])
     if up_img and st.button("🚀 CHẠY OCR"):
-        reader = load_ocr()
-        res_ocr = reader.readtext(np.array(Image.open(up_img)), detail=0)
-        nums = [re.sub(r'\D', '', n) for n in res_ocr if len(re.sub(r'\D', '', n)) >= 2]
+        res = load_ocr().readtext(np.array(Image.open(up_img)), detail=0)
+        nums = [re.sub(r'\D','',n) for n in res if len(re.sub(r'\D','',n))>=2]
         if nums:
-            st.session_state['raw_input'] = ", ".join(nums)
-            st.session_state['gdb_val'] = nums[0][-2:]
-            st.success("Đã quét xong! Kiểm tra lại ở mục nhập liệu.")
+            st.session_state['raw_input'] = ",".join(nums)
+            st.session_state['gdb_now'] = nums[0][-2:]
 
-    st.header("📝 3. NHẬP LIỆU")
-    raw_input = st.text_area("Loto 27 giải:", value=st.session_state.get('raw_input', ""), height=100)
-    gdb_val = st.text_input("GĐB (2 số cuối):", value=st.session_state.get('gdb_val', ""))
+    raw_in = st.text_area("27 giải loto:", value=st.session_state.get('raw_input',''))
+    gdb_now = st.text_input("GĐB (2 số cuối):", value=st.session_state.get('gdb_now',''))
 
-    if st.button("🔥 PHÂN TÍCH & LƯU", type="primary", use_container_width=True):
-        raw_list = [x.strip()[-2:] for x in raw_input.replace(",", " ").split() if len(x.strip()) >= 2]
-        if len(raw_list) >= 27 and gdb_val:
-            # 1. Cập nhật Ma trận
-            mapping = get_mapping_v11(st.session_state['last_full_str'])
-            update_matrix_state(st.session_state['db'], raw_list[:27], mapping)
+    if st.button("🔥 PHÂN TÍCH & LƯU KỲ MỚI", type="primary"):
+        raw_list = [x.strip()[-2:] for x in raw_in.replace(","," ").split() if len(x.strip())>=2]
+        if len(raw_list) >= 27 and gdb_now:
+            # BƯỚC 1: Lấy mapping cũ để cập nhật database
+            old_mapping = get_mapping_v11(st.session_state['last_full_str'])
+            for wid, wd in st.session_state['db'].items():
+                num = old_mapping.get(str(wid))
+                if num in raw_list[:27]:
+                    wd["streak_win"], wd["streak_loss"] = wd.get("streak_win",0)+1, 0
+                    wd["score"] = wd.get("score",1000.0) - 2.7
+                else:
+                    wd["streak_loss"], wd["streak_win"] = wd.get("streak_loss",0)+1, 0
+                    wd["score"] = wd.get("score",1000.0) + 1.0
             
-            # 2. Lưu lịch sử
-            new_entry = {
-                "STT": len(st.session_state['history']) + 1,
-                "GĐB": gdb_val,
-                "Dan79": st.session_state.get('last_79', ""),
-                "Dan59": st.session_state.get('last_59', ""),
-                "Dan39": st.session_state.get('last_39', "")
-            }
-            st.session_state['history'].insert(0, new_entry)
+            # BƯỚC 2: Cập nhật chuỗi 107 vị trí mới
             st.session_state['last_full_str'] = "".join(raw_list[:27])
-            st.success("Đã lưu lịch sử và cập nhật ma trận!")
+            
+            # BƯỚC 3: Lưu lịch sử
+            st.session_state['history'].insert(0, {"STT": len(st.session_state['history'])+1, "GĐB": gdb_now})
+            st.success("Đã cập nhật Rank và Chạm mới!")
             st.rerun()
 
-# --- HIỂN THỊ KẾT QUẢ ---
+# --- HIỂN THỊ BIẾN THIÊN ---
 if st.session_state['last_full_str']:
-    # Hàm tính toán df_full (giữ nguyên logic của mày)
-    def get_matrix_df():
-        db, mapping = st.session_state['db'], get_mapping_v11(st.session_state['last_full_str'])
-        res = []
-        for i in range(100):
-            num = f"{i:02d}"
-            # Logic tính Điểm, Tang, An, Cứng của mày...
-            res.append({"Số": num, "Điểm": 10.0, "Tang": 1, "An": 2, "Cứng": 8.5}) 
-        df = pd.DataFrame(res).sort_values("Điểm", ascending=False).reset_index(drop=True)
-        df["Rank"] = df.index + 1
-        return df
-
-    df_full_raw = get_matrix_df()
-    dk, da, ds, df_full, low_5 = thermal_ai_engines_v80(df_full_raw, st.session_state['history'], st.session_state['db'], None, st.session_state['cfg'])
+    # Tính Rank dựa trên dữ liệu VỪA CẬP NHẬT
+    df_current_rank = get_matrix_df_v13(st.session_state['db'], st.session_state['last_full_str'])
+    low_5_dynamic = get_low_5_realtime(df_current_rank)
     
-    # Lưu dàn vào session để tí nữa bấm nút Lưu nó có cái để ghi vào lịch sử
-    st.session_state['last_79'] = ", ".join(ds['Số'].tolist())
-    st.session_state['last_59'] = ", ".join(da['Số'].tolist())
-    st.session_state['last_39'] = ", ".join(dk['Số'].tolist())
+    # HIỂN THỊ Ô THÔNG SỐ
+    st.markdown(f"### 🔮 5 Chạm Đáy Biến Thiên: `{','.join(low_5_dynamic)}`")
+    
+    # BẢNG ĐỐI SOÁT A/T
+    st.subheader("📜 Lịch sử đối soát A/T")
+    df_h = pd.DataFrame(st.session_state['history'])
+    if not df_h.empty:
+        def check_at(row):
+            g = str(row['GĐB'])[-2:]
+            is_hit = any(d in g for d in low_5_dynamic)
+            is_kep = g[0] == g[1] if len(g)==2 else False
+            return "A" if (is_hit or is_kep) else "T"
+        
+        df_h['Kết quả'] = df_h.apply(check_at, axis=1)
+        st.dataframe(df_h[['STT', 'GĐB', 'Kết quả']].head(15), use_container_width=True)
 
-    # GIAO DIỆN HIỂN THỊ
-    cm1, cm2 = st.columns([1, 4])
-    cm1.metric("🔮 5 CHẠM ĐÁY", "".join(low_5))
-    cm2.info(f"💡 Đối soát: A = Trúng Chạm đáy {low_5} hoặc Kép.")
-
-    st.subheader("📜 ĐỐI SOÁT LỊCH SỬ")
-    if st.session_state['history']:
-        df_h = pd.DataFrame(st.session_state['history'])
-        def check_v13(row):
-            g = str(row.get('GĐB', ""))[-2:]
-            return "A" if (any(d in g for d in low_5) or (len(g)==2 and g[0]==g[1])) else "T"
-        df_h['KQ_Chạm'] = df_h.apply(check_v13, axis=1)
-        st.dataframe(df_h.reindex(columns=['STT', 'GĐB', 'KQ_Chạm', 'Dan79', 'Dan59', 'Dan39']).head(15), use_container_width=True)
-
-    # HIỂN THỊ CÁC DÀN SỐ
-    st.success("🎯 DÀN 80 CHIẾN THUẬT (ĐÃ LỌC LỆCH CAO)")
-    # (Logic lọc 20 con lệch của mày...)
-    st.code(st.session_state['last_79'])
-
-    c1, c2, c3 = st.columns(3)
-    c1.success("🎯 Kết 39"); c1.code(st.session_state['last_39'])
-    c2.info("🤖 AI 59"); c2.code(st.session_state['last_59'])
-    c3.warning("🛡️ Safe 79"); c3.code(st.session_state['last_79'])
+    # DÀN 80 SỐ (Loại 20 con lệch của chạm cao)
+    all_digs = set("0123456789")
+    high_5 = all_digs - set(low_5_dynamic)
+    to_remove = [f"{d1}{d2}" for d1 in high_5 for d2 in high_5 if d1 != d2]
+    
+    # Lấy 80 số từ Rank 1 -> 80 (đã trừ 20 con lệch chạm cao)
+    dàn_full_100 = df_current_rank["Số"].tolist()
+    dàn_80_final = [s for s in dàn_full_100 if s not in to_remove][:80]
+    
+    st.success(f"🎯 Dàn 80 số tối ưu cho kỳ sau (Dựa trên chạm {','.join(low_5_dynamic)})")
+    st.code(", ".join(dàn_80_final))

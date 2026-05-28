@@ -7,7 +7,7 @@ import re
 from PIL import Image
 from collections import Counter
 
-# --- 1. CẤU HÌNH HỆ THỐNG ---
+# --- 1. CẤU HÌNH OCR & MAPPING ---
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['en'])
@@ -17,58 +17,36 @@ def get_mapping_v11(full_str, total_pos=107):
         return {str(i): f"{i % 100:02d}" for i in range(11449)}
     return {str(i * total_pos + j): f"{full_str[i]}{full_str[j]}" for i in range(total_pos) for j in range(total_pos)}
 
-# --- 2. LOGIC TÍNH RANK VÀ NHẶT 6 CHẠM (KHÔNG DÙNG CACHE ĐỂ ĐẢM BẢO NHẢY SỐ) ---
-def get_current_matrix_rank(db, last_full_str):
-    if not db or not last_full_str:
-        return pd.DataFrame(columns=["Số", "Điểm", "Rank"])
-    
-    mapping = get_mapping_v11(last_full_str)
-    # Tính toán điểm số dựa trên trạng thái Score hiện tại trong DB
-    stats = {f"{i:02d}": 0.0 for i in range(100)}
-    counts = {f"{i:02d}": 0 for i in range(100)}
-    
-    for wid, wd in db.items():
-        num = mapping.get(str(wid))
-        if num:
-            stats[num] += float(wd.get('score', 1000.0))
-            counts[num] += 1
-            
-    res = []
-    for num in stats:
-        avg_score = stats[num] / max(1, counts[num])
-        res.append({"Số": num, "Điểm": avg_score})
-        
-    df = pd.DataFrame(res).sort_values("Điểm", ascending=False).reset_index(drop=True)
-    df["Rank"] = df.index + 1
-    return df
-
+# --- 2. LOGIC TÍNH RANK VÀ NHẶT CHẠM (ÉP TÍNH MỚI MỖI KỲ) ---
 def get_hybrid_6_touches(df_rank):
     if df_rank.empty: return ["?"]*3, ["?"]*3
     
-    # 3 Mạnh (Đầu bảng Rank)
+    # 3 Mạnh (Từ đỉnh Rank xuống)
     top_digits = []
-    for s in df_rank.sort_values("Rank")["Số"]:
+    df_top = df_rank.sort_values("Rank", ascending=True)
+    for s in df_top["Số"]:
         for char in str(s):
             if char not in top_digits: top_digits.append(char)
             if len(top_digits) == 3: break
         if len(top_digits) == 3: break
             
-    # 3 Yếu (Cuối bảng Rank)
+    # 3 Yếu (Từ đáy Rank lên)
     bot_digits = []
-    for s in df_rank.sort_values("Rank", ascending=False)["Số"]:
+    df_bot = df_rank.sort_values("Rank", ascending=False)
+    for s in df_bot["Số"]:
         for char in str(s):
-            if char not in bot_digits and char not in top_digits:
+            if char not in bot_digits and char not in top_digits: 
                 bot_digits.append(char)
             if len(bot_digits) == 3: break
         if len(bot_digits) == 3: break
             
     return sorted(top_digits), sorted(bot_digits)
 
-# --- 3. GIAO DIỆN STREAMLIT ---
-st.set_page_config(layout="wide", page_title="Matrix V13.95 Stable")
-st.title("🛡️ Matrix V13.95 - Dynamic Rhythm (6-Touch)")
+# --- 3. GIAO DIỆN CHÍNH ---
+st.set_page_config(layout="wide", page_title="Matrix V13.96 Stable")
+st.title("🛡️ Matrix V13.96 - Zero-Latency Rhythm (6-Touch)")
 
-# Khởi tạo Session
+# Khởi tạo Session State
 for key in ['db', 'history', 'last_full_str', 'raw_input', 'gdb_now']:
     if key not in st.session_state:
         st.session_state[key] = {} if key == 'db' else ([] if key == 'history' else "")
@@ -102,60 +80,75 @@ with st.sidebar:
     if st.button("🔥 PHÂN TÍCH & LƯU KỲ MỚI", type="primary", use_container_width=True):
         raw_list = [x.strip()[-2:] for x in raw_in.replace(","," ").split() if len(x.strip())>=2]
         if len(raw_list) >= 27 and gdb_now and st.session_state['db']:
-            # BƯỚC 1: Lấy chạm cũ (đang dùng cho kỳ này)
-            df_old = get_current_matrix_rank(st.session_state['db'], st.session_state['last_full_str'])
-            t3_old, b3_old = get_hybrid_6_touches(df_old)
+            # BƯỚC 1: Lấy bảng Rank HIỆN TẠI để chốt 6 chạm cho kỳ vừa quay
+            mapping_now = get_mapping_v11(st.session_state['last_full_str'])
+            stats_now = {f"{i:02d}": 0.0 for i in range(100)}
+            for wid, wd in st.session_state['db'].items():
+                num = mapping_now.get(str(wid))
+                if num: stats_now[num] += float(wd.get('score', 1000.0))
+            
+            df_now = pd.DataFrame([{"Số": k, "Điểm": v} for k, v in stats_now.items()]).sort_values("Điểm", ascending=False).reset_index(drop=True)
+            df_now["Rank"] = df_now.index + 1
+            t3, b3 = get_hybrid_6_touches(df_now)
             
             # BƯỚC 2: Cập nhật Score cho Ma trận
-            mapping = get_mapping_v11(st.session_state['last_full_str'])
             for wid, wd in st.session_state['db'].items():
-                num = mapping.get(str(wid))
+                num = mapping_now.get(str(wid))
                 if num in raw_list[:27]:
                     wd["score"] = wd.get("score", 1000.0) - 2.7
-                    wd["streak_win"] = wd.get("streak_win", 0) + 1
                 else:
                     wd["score"] = wd.get("score", 1000.0) + 1.0
-                    wd["streak_win"] = 0
-
-            # BƯỚC 3: Lưu lịch sử kèm chạm đã chốt
+            
+            # BƯỚC 3: Lưu lịch sử và cập nhật chuỗi 107 vị trí mới
             st.session_state['history'].insert(0, {
                 "STT": len(st.session_state['history']) + 1,
                 "GĐB": gdb_now,
-                "Chốt_6": "".join(t3_old + b3_old)
+                "Chốt_6": "".join(t3 + b3)
             })
-            # Cập nhật chuỗi 107 vị trí mới
             st.session_state['last_full_str'] = "".join(raw_list[:27])
             st.rerun()
 
-# --- HIỂN THỊ CHÍNH (LUÔN CẬP NHẬT THEO RANK MỚI) ---
+# --- 4. HIỂN THỊ KẾT QUẢ (THỰC THI MỖI LẦN RERUN) ---
 if st.session_state['db'] and st.session_state['last_full_str']:
-    # Tính toán Rank và Chạm dựa trên dữ liệu mới nhất trong Session
-    df_rank = get_current_matrix_rank(st.session_state['db'], st.session_state['last_full_str'])
-    top3, bot3 = get_hybrid_6_touches(df_rank)
-    all_6 = sorted(list(set(top3 + bot3)))
+    # TÍNH RANK MỚI NGAY LẬP TỨC
+    mapping_latest = get_mapping_v11(st.session_state['last_full_str'])
+    stats_latest = {f"{i:02d}": 0.0 for i in range(100)}
+    for wid, wd in st.session_state['db'].items():
+        num = mapping_latest.get(str(wid))
+        if num: stats_latest[num] += float(wd.get('score', 1000.0))
+    
+    df_rank = pd.DataFrame([{"Số": k, "Điểm": v} for k, v in stats_latest.items()]).sort_values("Điểm", ascending=False).reset_index(drop=True)
+    df_rank["Rank"] = df_rank.index + 1
+    
+    t3_next, b3_next = get_hybrid_6_touches(df_rank)
+    all_6_next = sorted(list(set(t3_next + b3_next)))
 
+    # Metrics cho kỳ tới
     st.markdown("---")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("🔝 3 MẠNH", ",".join(top3))
-    c2.metric("📉 3 YẾU", ",".join(bot3))
-    c3.metric("🎯 TỔNG 6 CHẠM KỲ TỚI", "".join(all_6))
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🔝 3 MẠNH (Ngày mai)", ",".join(t3_next))
+    m2.metric("📉 3 YẾU (Ngày mai)", ",".join(b3_next))
+    m3.metric("🎯 BỘ 6 CHẠM", "".join(all_6_next))
 
-    st.subheader("📜 ĐỐI SOÁT CHUẨN NHỊP")
+    # Lịch sử đối soát
+    st.subheader("📜 ĐỐI SOÁT CHUẨN KỲ")
     if st.session_state['history']:
         df_h = pd.DataFrame(st.session_state['history'])
-        def check_result(row):
-            g = str(row['GĐB'])[-2:]; c6 = str(row.get('Chốt_6', ""))
+        def check_at(row):
+            g = str(row['GĐB'])[-2:]
+            c6 = str(row.get('Chốt_6', ""))
             if not c6: return "-"
-            return "A" if (any(d in g for d in c6) or (len(g)==2 and g[0]==g[1])) else "T"
-        df_h['KQ'] = df_h.apply(check_result, axis=1)
+            is_hit = any(d in g for d in c6)
+            is_kep = g[0] == g[1] if len(g)==2 else False
+            return "A" if (is_hit or is_kep) else "T"
+        
+        df_h['KQ'] = df_h.apply(check_at, axis=1)
         st.dataframe(df_h.reindex(columns=['STT', 'GĐB', 'Chốt_6', 'KQ']).head(15), use_container_width=True)
 
-    # Dàn 88 số chiến thuật
-    high_4 = set("0123456789") - set(all_6)
+    # Dàn 88 số
+    high_4 = set("0123456789") - set(all_6_next)
     to_remove = [f"{d1}{d2}" for d1 in high_4 for d2 in high_4 if d1 != d2]
     dàn_88 = [s for s in df_rank["Số"].tolist() if s not in to_remove]
     
-    st.success(f"💎 DÀN 88 SỐ CHIẾN THUẬT (Dựa trên bộ chạm {','.join(all_6)})")
+    st.success(f"💎 DÀN 88 SỐ CHO KỲ TỚI (Bao phủ 6 chạm: {','.join(all_6_next)})")
     st.code(", ".join(dàn_88))
-else:
-    st.warning("👈 Nạp dữ liệu ở Sidebar để bắt đầu.")

@@ -58,17 +58,15 @@ def get_wire_lineage_v2(db, history, mapping, n_top_bet):
         return {f"{int(mapping.get(w_id)):02d}" for w_id, score in top_wires if mapping.get(w_id)}
     except: return set()
 
-# --- 2. LOGIC NHẶT 6 CHẠM BỔ TRỢ (2 MẠNH + 4 YẾU) ---
+# --- 2. LOGIC 6 CHẠM BỔ TRỢ ---
 def get_hybrid_6_touches(df_rank):
     if df_rank.empty: return ["?"]*2, ["?"]*4
     top_digits, bot_digits = [], []
-    # 2 Mạnh
     for s in df_rank.sort_values("Rank")["Số"]:
         for char in str(s):
             if char not in top_digits: top_digits.append(char)
             if len(top_digits) == 2: break
         if len(top_digits) == 2: break
-    # 4 Yếu
     for s in df_rank.sort_values("Rank", ascending=False)["Số"]:
         for char in str(s):
             if char not in bot_digits and char not in top_digits:
@@ -77,11 +75,10 @@ def get_hybrid_6_touches(df_rank):
         if len(bot_digits) == 4: break
     return sorted(top_digits), sorted(bot_digits)
 
-# --- 3. BỘ NÃO HẠ DÀN HYBRID V13.8 ---
+# --- 3. BỘ NÃO HYBRID V13.8.1 ---
 def thermal_ai_engines_v138(df_raw, history, db, mapping, cfg):
     if df_raw is None or df_raw.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], [], pd.DataFrame(), ([], [])
     
-    # 6 Chạm bổ trợ xét loại
     t2, b4 = get_hybrid_6_touches(df_raw)
     all_6 = set(t2 + b4)
     remain_4 = set("0123456789") - all_6
@@ -95,22 +92,19 @@ def thermal_ai_engines_v138(df_raw, history, db, mapping, cfg):
     set_bet = get_wire_lineage_v2(db, history, mapping, cfg['bet'])
     set_overlap = set_bottom.intersection(set_bet)
     
-    # Định nghĩa Lõi (Core)
     df_raw['core_79'] = ((df_raw['Tang'].isin([0, 1, 2, 3])) & (df_raw['An'].isin([1, 2, 3, 4, 5])) & (df_raw['Cứng'] > 7.0)).astype(int)
     df_raw['shield_T0'] = ((df_raw['Tang'] == 0) & (df_raw['Rank'] <= 10)).astype(int)
     df_raw['shield_A5'] = ((df_raw['An'] >= 5) & (df_raw['Số'].isin(set_bet))).astype(int)
     df_raw['has_shield'] = ((df_raw['shield_T0'] == 1) | (df_raw['shield_A5'] == 1)).astype(int)
 
-    # Điểm phạt xét loại bổ trợ (6 chạm)
     def get_touch_penalty(s):
-        if s in vùng_lệch_phế: return -30 # Lệch không thuộc 6 chạm
-        if s in vùng_kép_phế: return -15  # Kép không thuộc 6 chạm
+        if s in vùng_lệch_phế: return -30
+        if s in vùng_kép_phế: return -15
         return 0
     
     df_raw['touch_penalty'] = df_raw['Số'].apply(get_touch_penalty)
     df_raw['overlap_penalty'] = (df_raw['Số'].isin(set_overlap).astype(int) * (1 - df_raw['has_shield']) * -50)
     
-    # Safety Score 79 tổng lực
     df_raw['safety_score_79'] = (
         (df_raw['has_shield'] * 200) + 
         (df_raw['core_79'] * 100) + 
@@ -125,17 +119,15 @@ def thermal_ai_engines_v138(df_raw, history, db, mapping, cfg):
     
     return dk_39, da_59, ds_79, sorted(list(set_bottom)), sorted(list(set_bet)), df_raw, (t2, b4)
 
-# --- 4. GIAO DIỆN CHÍNH ---
-st.set_page_config(layout="wide", page_title="Matrix Shield Gold Hybrid")
-st.title("🛡️ Matrix V13.8 - Hybrid Risk Shield Gold")
+# --- 4. UI ---
+st.set_page_config(layout="wide", page_title="Matrix Hybrid Full")
+st.title("🛡️ Matrix V13.8.1 - Hybrid Shield (Full History)")
 
-# Khởi tạo Session
 if 'cfg' not in st.session_state: st.session_state['cfg'] = {"tier": 68, "win": 10, "hard": 7.99, "bot": 40, "bet": 40}
 if 'db' not in st.session_state: st.session_state['db'] = {}
 if 'history' not in st.session_state: st.session_state['history'] = []
 if 'last_full_str' not in st.session_state: st.session_state['last_full_str'] = ""
-if 'raw_input' not in st.session_state: st.session_state['raw_input'] = ""
-if 'gdb_val' not in st.session_state: st.session_state['gdb_val'] = ""
+if 'prev_sets' not in st.session_state: st.session_state['prev_sets'] = {}
 
 with st.sidebar:
     if st.button("🚨 RESET ALL", use_container_width=True): st.session_state.clear(); st.rerun()
@@ -143,7 +135,7 @@ with st.sidebar:
     up_json = st.file_uploader("Nạp JSON", type=['json'])
     if up_json and st.button("XÁC NHẬN NẠP"):
         data = json.load(up_json)
-        st.session_state.update({'db': data.get('matrix', data), 'history': data.get('history', []), 'last_full_str': data.get('last_full_str', "")})
+        st.session_state['db'], st.session_state['history'], st.session_state['last_full_str'] = data.get('matrix', data), data.get('history', []), data.get('last_full_str', "")
         st.rerun()
 
     st.header("📸 2. QUÉT KQ")
@@ -152,36 +144,44 @@ with st.sidebar:
         res_ocr = load_ocr().readtext(np.array(Image.open(up_img)), detail=0)
         nums = [n for n in res_ocr if n.isdigit() and 2 <= len(n) <= 5]
         if nums: 
-            st.session_state['raw_input'] = ", ".join(nums)
-            st.session_state['gdb_val'] = nums[0][-2:]
+            st.session_state['raw_input'], st.session_state['gdb_val'] = ", ".join(nums), nums[0][-2:]
             st.rerun()
 
     st.divider()
     if st.button("🔥 PHÂN TÍCH & LƯU", type="primary", use_container_width=True):
-        raw_list = [x.strip() for x in st.session_state['raw_input'].replace(",", " ").split() if x]
-        if len(raw_list) >= 27 and st.session_state['gdb_val'] and st.session_state['db']:
+        raw_val, gdb_val = st.session_state.get('raw_input', ""), st.session_state.get('gdb_val', "")
+        raw_list = [x.strip() for x in raw_val.replace(",", " ").split() if x]
+        if len(raw_list) >= 27 and gdb_val and st.session_state['db']:
             mapping = get_mapping_v11(st.session_state['last_full_str'])
-            # Lưu lịch sử kèm theo bộ 6 chạm đang dùng tại thời điểm đó
+            gdb_num = f"{int(re.sub(r'\D', '', gdb_val)[-2:]):02d}"
+            p = st.session_state.get('prev_sets', {})
+            check = lambda d: "A" if gdb_num in (d or []) else "T"
+            
+            # Kiểm tra riêng 6 Chạm (A nếu dính chạm hoặc là kép bằng)
+            c6 = p.get('c6_str', "")
+            is_hit_6 = any(d in gdb_num for d in c6) or (gdb_num[0] == gdb_num[1])
+            res_6t = "A" if is_hit_6 else "T"
+
             st.session_state['history'].insert(0, {
-                "STT": len(st.session_state['history']) + 1, 
-                "GĐB": st.session_state['gdb_val'],
-                "6-Touch": st.session_state.get('current_6t', "")
+                "STT": len(st.session_state['history']) + 1, "GĐB": gdb_val,
+                "Dan39": check(p.get('d39')), "Dan59": check(p.get('d59')), "Dan79": check(p.get('d79')),
+                "180thap": check(p.get('dthap')), "180cao": check(p.get('dcao')),
+                "6-Touch": p.get('c6_str', ""), "KQ_6": res_6t
             })
             update_matrix_state(st.session_state['db'], [n[-2:] for n in raw_list[:27]], mapping)
-            st.session_state['last_full_str'] = "".join(raw_list[:27])
-            st.rerun()
+            st.session_state['last_full_str'] = "".join(raw_list[:27]); st.rerun()
 
     st.header("📝 3. INPUT")
-    st.session_state['raw_input'] = st.text_area("Loto 27 giải:", value=st.session_state['raw_input'], height=80)
-    st.session_state['gdb_val'] = st.text_input("GĐB:", value=st.session_state['gdb_val'])
-
+    st.session_state['raw_input'] = st.text_area("Loto:", value=st.session_state.get('raw_input', ""), height=80)
+    st.session_state['gdb_val'] = st.text_input("GĐB:", value=st.session_state.get('gdb_val', ""))
+    
     st.header("⚙️ 4. BỘ LỌC")
     st.session_state['cfg']['tier'] = st.slider("Tầng (%):", 50, 80, 68)
     st.session_state['cfg']['win'] = st.slider("Kỳ:", 5, 20, 10)
     st.session_state['cfg']['bot'] = st.slider("Đáy:", 0, 350, 40)
     st.session_state['cfg']['bet'] = st.slider("Bệt:", 0, 350, 40)
 
-# --- 5. HIỂN THỊ BIẾN THIÊN ---
+# --- 5. HIỂN THỊ ---
 if st.session_state['last_full_str']:
     def get_matrix_df(t_val, w_val):
         db, mapping = st.session_state['db'], get_mapping_v11(st.session_state['last_full_str'])
@@ -203,43 +203,33 @@ if st.session_state['last_full_str']:
     df_raw_val = get_matrix_df(st.session_state['cfg']['tier'], st.session_state['cfg']['win'])
     dk, da, ds, d_thap, d_cao, df_full, (t2, b4) = thermal_ai_engines_v138(df_raw_val, st.session_state['history'], st.session_state['db'], get_mapping_v11(st.session_state['last_full_str']), st.session_state['cfg'])
     
-    # Lưu 6 chạm hiện tại vào session để dùng khi bấm Lưu
-    st.session_state['current_6t'] = "".join(t2 + b4)
+    # Lưu bộ đệm để chốt kỳ sau
+    st.session_state['prev_sets'] = {
+        'd39': dk["Số"].tolist(), 'd59': da["Số"].tolist(), 'd79': ds["Số"].tolist(), 
+        'dthap': d_thap, 'dcao': d_cao, 'c6_str': "".join(t2 + b4)
+    }
 
-    # --- KHU VỰC METRIC (MỚI) ---
+    # METRIC TRÊN ĐẦU
     st.markdown("---")
-    col_m1, col_m2, col_m3 = st.columns(3)
-    col_m1.metric("🔝 2 CHẠM MẠNH", ",".join(t2))
-    col_m2.metric("📉 4 CHẠM YẾU", ",".join(b4))
-    col_m3.info(f"💡 Cơ chế: Phạt lệch phế -30, Phạt kép phế -15. Lõi được ưu tiên xét trước.")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🔝 2 CHẠM MẠNH", ",".join(t2))
+    m2.metric("📉 4 CHẠM YẾU", ",".join(b4))
+    m3.info("Hybrid V13.8.1: Lõi + Phạt quân ngoài 6 chạm")
 
-    # --- HIỂN THỊ DÀN ---
     c1, c2, c3 = st.columns(3)
-    c1.success(f"🎯 Kết 39 ({len(dk)})\nPhụ thuộc: Core + 6-Touch"); c1.code(", ".join(dk["Số"].tolist()))
-    c2.info(f"🤖 AI 59 ({len(da)})\nNested in 79"); c2.code(", ".join(da["Số"].tolist()))
-    c3.warning(f"🛡️ Safe 79 ({len(ds)})\nRisk Shield Gold (T0/A5)"); c3.code(", ".join(ds["Số"].tolist()))
+    c1.success(f"🎯 Kết 39 ({len(dk)})"); c1.code(", ".join(dk["Số"].tolist()))
+    c2.info(f"🤖 AI 59 ({len(da)})"); c2.code(", ".join(da["Số"].tolist()))
+    c3.warning(f"🛡️ Safe 79 ({len(ds)})"); c3.code(", ".join(ds["Số"].tolist()))
 
     st.divider()
-    tab_hist, tab_rank = st.tabs(["📜 ĐỐI SOÁT LỊCH SỬ", "📊 CHI TIẾT RANK & SHIELD"])
-    
-    with tab_hist:
+    t_hist, t_rank = st.tabs(["📜 LỊCH SỬ ĂN/TRƯỢT", "📊 CHI TIẾT RANK"])
+    with t_hist:
         if st.session_state['history']:
-            df_h = pd.DataFrame(st.session_state['history'])
-            def check_6t_at(row):
-                g = str(row.get('GĐB', ""))[-2:]; c6 = str(row.get('6-Touch', ""))
-                if not c6: return "-"
-                # Ăn nếu dính chạm hoặc là kép bằng (bất kỳ)
-                is_hit = any(d in g for d in c6)
-                is_kep = g[0] == g[1] if len(g)==2 else False
-                return "A" if (is_hit or is_kep) else "T"
-            
-            df_h['KQ_Chạm'] = df_h.apply(check_6t_at, axis=1)
-            # Hiển thị các cột lịch sử
-            view_cols = ['STT', 'GĐB', '6-Touch', 'KQ_Chạm']
-            st.dataframe(df_h.reindex(columns=view_cols).head(20), use_container_width=True, hide_index=True)
-
-    with tab_rank:
+            df_hist = pd.DataFrame(st.session_state['history'])
+            # Đảm bảo hiển thị đúng thứ tự cột mày muốn
+            cols = ["STT", "GĐB", "Dan39", "Dan59", "Dan79", "180thap", "180cao", "6-Touch", "KQ_6"]
+            st.dataframe(df_hist.reindex(columns=cols), use_container_width=True, hide_index=True)
+    with t_rank:
         st.dataframe(df_full.sort_values(by=['safety_score_79', 'Điểm'], ascending=[False, False]), use_container_width=True)
 
-    # --- NÚT LƯU DỮ LIỆU ---
-    st.download_button("💾 XUẤT JSON CẬP NHẬT", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_v138_final.json", use_container_width=True)
+    st.download_button("💾 LƯU JSON", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_full_v1381.json", use_container_width=True)

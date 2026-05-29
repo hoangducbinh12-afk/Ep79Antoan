@@ -6,7 +6,7 @@ import easyocr
 import re
 from PIL import Image
 
-# --- 1. SETTINGS & OCR ---
+# --- 1. CẤU HÌNH & OCR ---
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['en'])
@@ -73,83 +73,165 @@ def get_hybrid_6_touches(df_rank):
         if len(bot_digits) == 4: break
     return sorted(top_digits), sorted(bot_digits)
 
-# --- 2. BỘ NÃO LỌC TẦNG V13.9.8 ---
+# --- 2. LOGIC GỌT DÀN SIÊU CẤP V13.9.8 ---
 def thermal_ai_engines_v1398(df_raw, history, db, mapping, cfg):
     if df_raw is None or df_raw.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], [], pd.DataFrame(), ([], []), set()
     
-    # BƯỚC 1: XÁC ĐỊNH DÀN GỐC 88
+    # A. XÁC ĐỊNH DÀN GỐC 88 (6 Chạm + Kép)
     t2, b4 = get_hybrid_6_touches(df_raw)
     digits_6 = set(t2 + b4)
     base_88 = {f"{i:02d}" for i in range(100) if any(d in f"{i:02d}" for d in digits_6) or (f"{i:02d}"[0] == f"{i:02d}"[1])}
     
-    # BƯỚC 2: GỌT DÀN 88 XUỐNG 79 SỐ
+    # B. CƠ CHẾ SÁT THỦ (Lỗi a,b,c,d,e)
     set_bet = get_wire_lineage_v2(db, history, mapping, cfg['bet'])
     bottom_wires = sorted(db.items(), key=lambda x: x[1]['score'])[:cfg['bot']]
     set_bottom = {f"{int(mapping.get(str(w_id))):02d}" for w_id, d in bottom_wires if mapping.get(str(w_id))}
-    set_overlap_absolute = set_bottom.intersection(set_bet) # d. Trùng bệt & đáy
+    set_overlap_absolute = set_bottom.intersection(set_bet) # f. Trùng Đáy & Bệt
     
     remain_4 = set("0123456789") - digits_6
-    kép_phế = {f"{d}{d}" for d in remain_4} # e. Kép phế
+    kép_phế = {f"{d}{d}" for d in remain_4} # a. Kép của 4 chạm phế
 
-    def calculate_79_penalty(row):
+    def get_penalty_count(row):
         p = 0
         if row['Tang'] == 0: p += 1      # a. T=0
         if row['Cứng'] < 8.0: p += 1     # b. C < 8
         if row['An'] == 0: p += 1        # c. A = 0
-        if row['Số'] in set_overlap_absolute: p += 1 # d
-        if row['Số'] in kép_phế: p += 1  # e
+        if row['Số'] in set_overlap_absolute: p += 1 # d. Trùng Đáy & Bệt
+        if row['Số'] in kép_phế: p += 1  # e. Kép phế
         return p
 
-    df_raw['penalty_79'] = df_raw.apply(calculate_79_penalty, axis=1)
+    df_raw['penalty_79'] = df_raw.apply(get_penalty_count, axis=1)
     df_raw['is_in_88'] = df_raw['Số'].apply(lambda x: 1 if x in base_88 else 0)
     df_raw['has_shield'] = (((df_raw['Tang'] == 0) & (df_raw['Rank'] <= 15)) | ((df_raw['An'] >= 5) & (df_raw['Số'].isin(set_bet)))).astype(int)
-    
-    # Điểm hạ dàn 79 (Shield bảo vệ T0 & A5)
+
+    # 1. GỌT DÀN 79 (Bám sát 88 số gốc)
     df_raw['safety_79'] = (df_raw['is_in_88'] * 2000) + (df_raw['has_shield'] * 150) - (df_raw['penalty_79'] * 100)
     ds_79 = df_raw.sort_values(by=['safety_79', 'Điểm', 'Số'], ascending=[False, False, True]).head(79)
 
-    # BƯỚC 3: LỌC DÀN 39 TỪ DÀN 79 (LOẠI TUYỆT ĐỐI)
+    # 2. LỌC DÀN 39 TỪ 79 (Loại tuyệt đối cực gắt)
     def evaluate_39_supreme(row):
-        # Chỉ xét các số thuộc dàn 79
         s = row['Số']
-        # a. Kép phế
+        # LOẠI TUYỆT ĐỐI (Penalty -10000)
         if s in kép_phế: return -10000
-        # b. T=0,3 (Loại 100%), T=2 (Yếu)
         if row['Tang'] in [0, 3]: return -10000
-        # c. A=0,5 (Loại 100%), A=1 (Yếu), A=4 (Yếu nhẹ)
         if row['An'] in [0, 5]: return -10000
-        # d. C<9 (Loại 100%), C=9-12 (Yếu), C=13-16 (Yếu nhẹ)
         if row['Cứng'] < 9.0: return -10000
-        # f. Trùng Đáy & Bệt (Loại 100%)
         if s in set_overlap_absolute: return -10000
-
-        # Tầng tính điểm cho những con sống sót
-        score_39 = 5000
-        if row['Tang'] == 2: score_39 -= 1000
-        if row['An'] == 1: score_39 -= 800
-        if row['An'] == 4: score_39 -= 400
-        c = row['Cứng']
-        if 9.0 <= c < 13.0: score_39 -= 600
-        elif 13.0 <= c <= 16.0: score_39 -= 200
         
-        # VÙNG XANH ƯU TIÊN SỐ 1 (A=2,3 & T=1)
-        if row['An'] in [2, 3] and row['Tang'] == 1:
-            score_39 += 10000
-            
-        return score_39
+        # CHẤM ĐIỂM CHO NHÓM SỐNG SÓT
+        sc = 1000
+        if row['Tang'] == 2: sc -= 300
+        if row['An'] == 1: sc -= 250
+        if row['An'] == 4: sc -= 100
+        c = row['Cứng']
+        if 9.0 <= c < 13.0: sc -= 200
+        elif 13.0 <= c <= 16.0: sc -= 50
+        
+        # ƯU TIÊN VÙNG XANH (A=2,3 ghép T=1)
+        if row['An'] in [2, 3] and row['Tang'] == 1: sc += 5000
+        return sc
 
-    # Ép dàn 39 phải lấy từ ds_79
     ds_79['score_39'] = ds_79.apply(evaluate_39_supreme, axis=1)
     dk_39 = ds_79.sort_values(by=['score_39', 'Điểm', 'Số'], ascending=[False, False, True]).head(39)
     
-    # BƯỚC 4: DÀN 59 (LẤY 39 LÀM GỐC + 20 CON KHỎE NHẤT TRONG 40 CON CÒN LẠI CỦA 79)
+    # 3. DÀN 59 (Lấy 39 làm gốc + 20 con khỏe nhất từ 40 con còn lại của 79)
     s39_set = set(dk_39['Số'])
     rem_in_79 = ds_79[~ds_79['Số'].isin(s39_set)]
-    # Nhặt 20 con khỏe nhất dựa trên Điểm ma trận
-    top_20_remain = rem_in_79.sort_values(by=['Điểm', 'Số'], ascending=[False, True]).head(20)
-    da_59 = pd.concat([dk_39, top_20_remain]).sort_values(by=['Điểm', 'Số'], ascending=[False, True])
-
+    top_20 = rem_in_79.sort_values(by=['Điểm', 'Số'], ascending=[False, True]).head(20)
+    da_59 = pd.concat([dk_39, top_20]).sort_values(by=['Điểm', 'Số'], ascending=[False, True])
+    
     return dk_39, da_59, ds_79, sorted(list(set_bottom)), sorted(list(set_bet)), df_raw, (t2, b4), base_88
 
-# --- PHẦN UI GIỮ NGUYÊN BẢN CŨ CỦA MÀY ---
-# (Thay thế hàm thermal_ai_engines bằng v1398 vào phần hiển thị là xong)
+# --- 3. GIAO DIỆN HIỂN THỊ (GIỮ NGUYÊN BẢN CŨ) ---
+st.set_page_config(layout="wide", page_title="Matrix Hybrid V13.9.8")
+st.title("🛡️ Matrix Supreme V13.9.8 (Stable Filter)")
+
+if 'cfg' not in st.session_state: st.session_state['cfg'] = {"tier": 68, "win": 10, "hard": 7.99, "bot": 40, "bet": 40}
+if 'db' not in st.session_state: st.session_state['db'] = {}
+if 'history' not in st.session_state: st.session_state['history'] = []
+if 'last_full_str' not in st.session_state: st.session_state['last_full_str'] = ""
+if 'prev_sets' not in st.session_state: st.session_state['prev_sets'] = {}
+
+with st.sidebar:
+    if st.button("🚨 RESET ALL", use_container_width=True): st.session_state.clear(); st.rerun()
+    st.header("📂 DỮ LIỆU")
+    up_json = st.file_uploader("Nạp JSON", type=['json'])
+    if up_json and st.button("XÁC NHẬN NẠP"):
+        data = json.load(up_json)
+        st.session_state['db'], st.session_state['history'], st.session_state['last_full_str'] = data.get('matrix', data), data.get('history', []), data.get('last_full_str', "")
+        st.rerun()
+    
+    st.divider()
+    if st.button("🔥 PHÂN TÍCH & LƯU", type="primary", use_container_width=True):
+        raw_val, gdb_val = st.session_state.get('raw_input', ""), st.session_state.get('gdb_val', "")
+        raw_list = [x.strip() for x in raw_val.replace(",", " ").split() if x]
+        if len(raw_list) >= 27 and gdb_val and st.session_state['db']:
+            mapping = get_mapping_v11(st.session_state['last_full_str'])
+            gdb_num = f"{int(re.sub(r'\D', '', gdb_val)[-2:]):02d}"
+            p = st.session_state.get('prev_sets', {})
+            check = lambda d: "A" if gdb_num in (d or []) else "T"
+            
+            c6 = p.get('c6_str', "")
+            is_hit_6 = any(d in gdb_num for d in c6) or (gdb_num[0] == gdb_num[1])
+            st.session_state['history'].insert(0, {
+                "STT": len(st.session_state['history']) + 1, "GĐB": gdb_val,
+                "Dan39": check(p.get('d39')), "Dan59": check(p.get('d59')), "Dan79": check(p.get('d79')),
+                "88-Base": "A" if is_hit_6 else "T"
+            })
+            update_matrix_state(st.session_state['db'], [n[-2:] for n in raw_list[:27]], mapping)
+            st.session_state['last_full_str'] = "".join(raw_list[:27]); st.rerun()
+
+    st.header("📝 INPUT")
+    st.session_state['raw_input'] = st.text_area("Loto:", value=st.session_state.get('raw_input', ""), height=80)
+    st.session_state['gdb_val'] = st.text_input("GĐB:", value=st.session_state.get('gdb_val', ""))
+    st.header("⚙️ BỘ LỌC")
+    st.session_state['cfg']['tier'] = st.slider("Tầng (%):", 50, 80, 68)
+    st.session_state['cfg']['win'] = st.slider("Kỳ:", 5, 20, 10)
+    st.session_state['cfg']['bot'] = st.slider("Đáy:", 0, 100, 40)
+    st.session_state['cfg']['bet'] = st.slider("Bệt:", 0, 100, 40)
+
+# --- 4. DISPLAY ---
+if st.session_state['last_full_str']:
+    def get_matrix_df(t_val, w_val):
+        db, mapping = st.session_state['db'], get_mapping_v11(st.session_state['last_full_str'])
+        stats = {f"{i:02d}": {"total_score": 0.0, "max_an": 0, "hits": 0, "losses": []} for i in range(100)}
+        for w_id, w_d in db.items():
+            num = mapping.get(str(w_id))
+            if num:
+                s = stats[num]; sw, sl = int(w_d.get("streak_win", 0)), int(w_d.get("streak_loss", 0))
+                s["losses"].append(sl if sw == 0 else 0); s["max_an"] = max(s["max_an"], sw)
+                s["hits"] += sum(w_d.get("hit_history", [])[-w_val:])
+                if sw == 0: s["total_score"] += float(w_d.get("score", 1000.0))
+        res = []
+        for num, s in stats.items():
+            dc = max(1, len([x for x in s["losses"] if x > 0]))
+            hard = round((s["hits"] / (w_val * (11449/100))) * 100, 2)
+            score = round((s["total_score"] / dc) * (1 + hard/100), 2)
+            res.append({"Số": num, "Điểm": score, "Tang": calculate_tier(s["losses"], t_val), "An": s["max_an"], "Cứng": hard})
+        df = pd.DataFrame(res).sort_values(by=["Điểm", "Số"], ascending=[False, True]).reset_index(drop=True); df["Rank"] = df.index + 1; return df
+
+    df_raw_val = get_matrix_df(st.session_state['cfg']['tier'], st.session_state['cfg']['win'])
+    dk, da, ds, d_bot, d_bet, df_full, (t2, b4), b88 = thermal_ai_engines_v1398(df_raw_val, st.session_state['history'], st.session_state['db'], get_mapping_v11(st.session_state['last_full_str']), st.session_state['cfg'])
+    
+    st.session_state['prev_sets'] = {'d39': dk["Số"].tolist(), 'd59': da["Số"].tolist(), 'd79': ds["Số"].tolist(), 'c6_str': "".join(t2 + b4)}
+
+    st.markdown("---")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🔝 2 CHẠM MẠNH", ",".join(t2))
+    m2.metric("📉 4 CHẠM YẾU", ",".join(b4))
+    m3.info("V13.9.8: Tầng gọt 88 -> 79 -> 39 Elite")
+
+    c1, c2, c3 = st.columns(3)
+    c1.success(f"🎯 Cối 39 (Elite)"); c1.code(", ".join(dk["Số"].tolist()))
+    c2.info(f"🤖 Kết 59 (Hybrid)"); c2.code(", ".join(da["Số"].tolist()))
+    c3.warning(f"🛡️ Safe 79 (88-Base)"); c3.code(", ".join(ds["Số"].tolist()))
+
+    t_hist, t_rank = st.tabs(["📜 LỊCH SỬ", "📊 CHI TIẾT RANK"])
+    with t_hist:
+        if st.session_state['history']:
+            st.dataframe(pd.DataFrame(st.session_state['history']).reindex(columns=["STT", "GĐB", "Dan39", "Dan59", "Dan79", "88-Base"]), use_container_width=True, hide_index=True)
+    with t_rank:
+        # Hiển thị Rank dựa trên bộ lọc 79 số để mày soi cho chuẩn
+        st.dataframe(df_full.sort_values(by=['safety_79', 'Điểm', 'Số'], ascending=[False, False, True]), use_container_width=True)
+
+    st.download_button("💾 XUẤT MASTER JSON", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_master_v1398.json", use_container_width=True)

@@ -60,12 +60,12 @@ def get_wire_lineage_v2(db, history, mapping, n_top_bet):
 def get_hybrid_6_touches(df_rank):
     if df_rank.empty: return ["?"]*2, ["?"]*4
     top_digits, bot_digits = [], []
-    for s in df_rank.sort_values("Rank")["Số"]:
+    for s in df_rank.sort_values(by=["Rank", "Số"])["Số"]:
         for char in str(s):
             if char not in top_digits: top_digits.append(char)
             if len(top_digits) == 2: break
         if len(top_digits) == 2: break
-    for s in df_rank.sort_values("Rank", ascending=False)["Số"]:
+    for s in df_rank.sort_values(by=["Rank", "Số"], ascending=[False, True])["Số"]:
         for char in str(s):
             if char not in bot_digits and char not in top_digits:
                 bot_digits.append(char)
@@ -73,36 +73,34 @@ def get_hybrid_6_touches(df_rank):
         if len(bot_digits) == 4: break
     return sorted(top_digits), sorted(bot_digits)
 
-# --- 2. LOGIC LẤY DÀN & LOẠI (LÕI V13.9.4) ---
-def thermal_ai_engines_v1394(df_raw, history, db, mapping, cfg):
+# --- 2. LOGIC LẤY DÀN & LOẠI (LÕI V13.9.6 - FIXED) ---
+def thermal_ai_engines_v1396(df_raw, history, db, mapping, cfg):
     if df_raw is None or df_raw.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], [], pd.DataFrame(), ([], []), set()
     
-    # A. Tạo dàn gốc 88 (6 Chạm + Kép)
+    # A. 6 Chạm & Dàn 88 Base
     t2, b4 = get_hybrid_6_touches(df_raw)
     digits_6 = set(t2 + b4)
     base_88 = {f"{i:02d}" for i in range(100) if any(d in f"{i:02d}" for d in digits_6) or (f"{i:02d}"[0] == f"{i:02d}"[1])}
     
-    # B. Xác định vùng loại tuyệt đối
+    # B. Vùng loại Tuyệt đối
     set_bet = get_wire_lineage_v2(db, history, mapping, cfg['bet'])
     bottom_wires = sorted(db.items(), key=lambda x: x[1]['score'])[:cfg['bot']]
     set_bottom = {f"{int(mapping.get(str(w_id))):02d}" for w_id, d in bottom_wires if mapping.get(str(w_id))}
-    
-    # f. Loại trùng Đáy & Bệt
-    set_overlap_absolute = set_bottom.intersection(set_bet)
+    set_overlap_absolute = set_bottom.intersection(set_bet) # f. Loại trùng Đáy & Bệt
     
     remain_4 = set("0123456789") - digits_6
-    kép_phế = {f"{d}{d}" for d in remain_4}
+    kép_phế = {f"{d}{d}" for d in remain_4} # a. Kép phế
 
     def evaluate_39_score(row):
         s = row['Số']
         # --- LOẠI TUYỆT ĐỐI ---
-        if s in kép_phế: return -5000         # a
-        if row['Tang'] in [0, 3]: return -5000 # b
-        if row['An'] in [0, 5]: return -5000   # c
-        if row['Cứng'] < 9.0: return -5000     # d
-        if s in set_overlap_absolute: return -5000 # f
+        if s in kép_phế: return -5000         
+        if row['Tang'] in [0, 3]: return -5000 
+        if row['An'] in [0, 5]: return -5000   
+        if row['Cứng'] < 9.0: return -5000     
+        if s in set_overlap_absolute: return -5000 
 
-        # --- CHẤM ĐIỂM ƯU TIÊN ---
+        # --- XÉT YẾU ---
         sc = 1000
         if row['Tang'] == 2: sc -= 200
         if row['An'] == 1: sc -= 150
@@ -110,31 +108,34 @@ def thermal_ai_engines_v1394(df_raw, history, db, mapping, cfg):
         c = row['Cứng']
         if 9.0 <= c < 13.0: sc -= 150
         elif 13.0 <= c <= 16.0: sc -= 50
-        if row['An'] in [2, 3] and row['Tang'] == 1: sc += 1000 # Vùng Xanh
+        # --- ƯU TIÊN VÙNG XANH ---
+        if row['An'] in [2, 3] and row['Tang'] == 1: sc += 1000 
         return sc
 
     df_raw['score_39'] = df_raw.apply(evaluate_39_score, axis=1)
     df_raw['has_shield'] = (((df_raw['Tang'] == 0) & (df_raw['Rank'] <= 15)) | ((df_raw['An'] >= 5) & (df_raw['Số'].isin(set_bet)))).astype(int)
     df_raw['is_in_88'] = df_raw['Số'].apply(lambda x: 1 if x in base_88 else 0)
 
-    # Dàn 79 (88-Base + Shield)
+    # C. HẠ DÀN (CỐ ĐỊNH SAI LỆCH BẰNG CỘT 'Số')
     df_raw['safety_79'] = (df_raw['is_in_88'] * 500) + (df_raw['has_shield'] * 100)
-    ds_79 = df_raw.sort_values(by=['safety_79', 'Điểm'], ascending=[False, False]).head(79)
-
-    # Dàn 39 (Sát thủ)
-    dk_39 = ds_79.sort_values(by=['score_39', 'Điểm'], ascending=[False, False]).head(39)
     
-    # Dàn 59 (39 làm gốc + 20 con khỏe nhất từ 79)
+    # Dàn 79
+    ds_79 = df_raw.sort_values(by=['safety_79', 'Điểm', 'Số'], ascending=[False, False, True]).head(79)
+
+    # Dàn 39
+    dk_39 = ds_79.sort_values(by=['score_39', 'Điểm', 'Số'], ascending=[False, False, True]).head(39)
+    
+    # Dàn 59
     s39_set = set(dk_39['Số'])
     rem_79 = ds_79[~ds_79['Số'].isin(s39_set)]
-    top_20 = rem_79.sort_values(by='Điểm', ascending=False).head(20)
-    da_59 = pd.concat([dk_39, top_20]).sort_values(by='Điểm', ascending=False)
+    top_20 = rem_79.sort_values(by=['Điểm', 'Số'], ascending=[False, True]).head(20)
+    da_59 = pd.concat([dk_39, top_20]).sort_values(by=['Điểm', 'Số'], ascending=[False, True])
     
     return dk_39, da_59, ds_79, sorted(list(set_bottom)), sorted(list(set_bet)), df_raw, (t2, b4), base_88
 
-# --- 3. UI ---
-st.set_page_config(layout="wide", page_title="Matrix Hybrid V13.9.4")
-st.title("🛡️ Matrix V13.9.4 - Supreme 39 Shield")
+# --- 3. UI (GIỮ NGUYÊN HIỂN THỊ BẢN CŨ) ---
+st.set_page_config(layout="wide", page_title="Matrix Hybrid Supreme")
+st.title("🛡️ Matrix V13.9.6 - Supreme Shield (Stable)")
 
 if 'cfg' not in st.session_state: st.session_state['cfg'] = {"tier": 68, "win": 10, "hard": 7.99, "bot": 40, "bet": 40}
 if 'db' not in st.session_state: st.session_state['db'] = {}
@@ -207,17 +208,18 @@ if st.session_state['last_full_str']:
             hard = round((s["hits"] / (w_val * (11449/100))) * 100, 2)
             score = round((s["total_score"] / dc) * (1 + hard/100), 2)
             res.append({"Số": num, "Điểm": score, "Tang": calculate_tier(s["losses"], t_val), "An": s["max_an"], "Cứng": hard})
-        df = pd.DataFrame(res).sort_values("Điểm", ascending=False).reset_index(drop=True); df["Rank"] = df.index + 1; return df
+        df = pd.DataFrame(res).sort_values(by=["Điểm", "Số"], ascending=[False, True]).reset_index(drop=True); df["Rank"] = df.index + 1; return df
 
     df_raw_val = get_matrix_df(st.session_state['cfg']['tier'], st.session_state['cfg']['win'])
-    dk, da, ds, d_thap, d_cao, df_full, (t2, b4), b88 = thermal_ai_engines_v1394(df_raw_val, st.session_state['history'], st.session_state['db'], get_mapping_v11(st.session_state['last_full_str']), st.session_state['cfg'])
+    dk, da, ds, d_bot, d_bet, df_full, (t2, b4), b88 = thermal_ai_engines_v1396(df_raw_val, st.session_state['history'], st.session_state['db'], get_mapping_v11(st.session_state['last_full_str']), st.session_state['cfg'])
     
     st.session_state['prev_sets'] = {'d39': dk["Số"].tolist(), 'd59': da["Số"].tolist(), 'd79': ds["Số"].tolist(), 'c6_str': "".join(t2 + b4)}
 
+    st.markdown("---")
     m1, m2, m3 = st.columns(3)
     m1.metric("🔝 2 CHẠM MẠNH", ",".join(t2))
     m2.metric("📉 4 CHẠM YẾU", ",".join(b4))
-    m3.info("V13.9.4: Supreme 39 (Loại Đáy-Bệt)")
+    m3.info("Hybrid V13.9.6: Supreme 39 + No-Lapse Sort")
 
     c1, c2, c3 = st.columns(3)
     c1.success(f"🎯 Cối 39 (Elite)"); c1.code(", ".join(dk["Số"].tolist()))
@@ -229,6 +231,6 @@ if st.session_state['last_full_str']:
         if st.session_state['history']:
             st.dataframe(pd.DataFrame(st.session_state['history']).reindex(columns=["STT", "GĐB", "Dan39", "Dan59", "Dan79", "88-Base"]), use_container_width=True, hide_index=True)
     with t_rank:
-        st.dataframe(df_full.sort_values(by=['score_39', 'Điểm'], ascending=[False, False]), use_container_width=True)
+        st.dataframe(df_full.sort_values(by=['score_39', 'Điểm', 'Số'], ascending=[False, False, True]), use_container_width=True)
 
-    st.download_button("💾 XUẤT MASTER JSON", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_master_v1394.json", use_container_width=True)
+    st.download_button("💾 XUẤT MASTER JSON", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_master_v1396.json", use_container_width=True)

@@ -5,7 +5,6 @@ import numpy as np
 import easyocr
 import re
 from PIL import Image
-import io
 
 # --- 1. SETTINGS & OCR ---
 @st.cache_resource
@@ -58,7 +57,6 @@ def get_wire_lineage_v2(db, history, mapping, n_top_bet):
         return {f"{int(mapping.get(w_id)):02d}" for w_id, score in top_wires if mapping.get(w_id)}
     except: return set()
 
-# --- 2. LOGIC 6 CHẠM BỔ TRỢ ---
 def get_hybrid_6_touches(df_rank):
     if df_rank.empty: return ["?"]*2, ["?"]*4
     top_digits, bot_digits = [], []
@@ -75,53 +73,50 @@ def get_hybrid_6_touches(df_rank):
         if len(bot_digits) == 4: break
     return sorted(top_digits), sorted(bot_digits)
 
-# --- 3. BỘ NÃO HYBRID V13.8.1 ---
-def thermal_ai_engines_v138(df_raw, history, db, mapping, cfg):
-    if df_raw is None or df_raw.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], [], pd.DataFrame(), ([], [])
+# --- 2. LOGIC LẤY DÀN & LOẠI (LÕI V13.9.2) ---
+def thermal_ai_engines_v1392(df_raw, history, db, mapping, cfg):
+    if df_raw is None or df_raw.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), [], [], pd.DataFrame(), ([], []), set()
     
+    # A. Tạo dàn gốc 88 (6 Chạm + Kép)
     t2, b4 = get_hybrid_6_touches(df_raw)
-    all_6 = set(t2 + b4)
-    remain_4 = set("0123456789") - all_6
-    vùng_lệch_phế = [f"{d1}{d2}" for d1 in remain_4 for d2 in remain_4 if d1 != d2]
-    vùng_kép_phế = [f"{d1}{d1}" for d1 in remain_4]
-
-    set_bottom = set()
-    if cfg['bot'] > 0:
-        bottom_wires = sorted(db.items(), key=lambda x: x[1]['score'])[:cfg['bot']]
-        set_bottom = {f"{int(mapping.get(str(w_id))):02d}" for w_id, d in bottom_wires if mapping.get(str(w_id))}
+    digits_6 = set(t2 + b4)
+    base_88 = {f"{i:02d}" for i in range(100) if any(d in f"{i:02d}" for d in digits_6) or (f"{i:02d}"[0] == f"{i:02d}"[1])}
+    
+    # B. Xác định lỗi Sát thủ
     set_bet = get_wire_lineage_v2(db, history, mapping, cfg['bet'])
+    bottom_wires = sorted(db.items(), key=lambda x: x[1]['score'])[:cfg['bot']]
+    set_bottom = {f"{int(mapping.get(str(w_id))):02d}" for w_id, d in bottom_wires if mapping.get(str(w_id))}
     set_overlap = set_bottom.intersection(set_bet)
-    
-    df_raw['core_79'] = ((df_raw['Tang'].isin([0, 1, 2, 3])) & (df_raw['An'].isin([1, 2, 3, 4, 5])) & (df_raw['Cứng'] > 7.0)).astype(int)
-    df_raw['shield_T0'] = ((df_raw['Tang'] == 0) & (df_raw['Rank'] <= 10)).astype(int)
-    df_raw['shield_A5'] = ((df_raw['An'] >= 5) & (df_raw['Số'].isin(set_bet))).astype(int)
-    df_raw['has_shield'] = ((df_raw['shield_T0'] == 1) | (df_raw['shield_A5'] == 1)).astype(int)
+    remain_4 = set("0123456789") - digits_6
+    kép_phế = {f"{d}{d}" for d in remain_4}
 
-    def get_touch_penalty(s):
-        if s in vùng_lệch_phế: return -30
-        if s in vùng_kép_phế: return -15
-        return 0
-    
-    df_raw['touch_penalty'] = df_raw['Số'].apply(get_touch_penalty)
-    df_raw['overlap_penalty'] = (df_raw['Số'].isin(set_overlap).astype(int) * (1 - df_raw['has_shield']) * -50)
-    
-    df_raw['safety_score_79'] = (
-        (df_raw['has_shield'] * 200) + 
-        (df_raw['core_79'] * 100) + 
-        (df_raw['Số'].isin(set_bet).astype(int) * 10) + 
-        df_raw['touch_penalty'] + 
-        df_raw['overlap_penalty']
-    )
-    
+    def get_penalty(row):
+        p = 0
+        if row['Tang'] == 0: p += 1 # a
+        if row['Cứng'] < 8.0: p += 1 # b
+        if row['An'] == 0: p += 1 # c
+        if row['Số'] in set_overlap: p += 1 # d
+        if row['Số'] in kép_phế: p += 1 # e
+        return p
+
+    df_raw['penalty'] = df_raw.apply(get_penalty, axis=1)
+    df_raw['has_shield'] = (((df_raw['Tang'] == 0) & (df_raw['Rank'] <= 15)) | ((df_raw['An'] >= 5) & (df_raw['Số'].isin(set_bet)))).astype(int)
+    df_raw['is_in_88'] = df_raw['Số'].apply(lambda x: 1 if x in base_88 else 0)
+
+    # C. Hạ dàn 79 & 59 (Có Shield)
+    df_raw['safety_score_79'] = (df_raw['is_in_88'] * 500) + (df_raw['has_shield'] * 100) - (df_raw['penalty'] * 60)
     ds_79 = df_raw.sort_values(by=['safety_score_79', 'Điểm'], ascending=[False, False]).head(79)
-    da_59 = ds_79.sort_values(by=['Điểm'], ascending=False).head(59)
-    dk_39 = da_59.sort_values(by=['Tang', 'An', 'Điểm'], ascending=[True, False, False]).head(39)
-    
-    return dk_39, da_59, ds_79, sorted(list(set_bottom)), sorted(list(set_bet)), df_raw, (t2, b4)
+    da_59 = ds_79.sort_values(by=['safety_score_79', 'Điểm'], ascending=[False, False]).head(59)
 
-# --- 4. UI ---
-st.set_page_config(layout="wide", page_title="Matrix Hybrid Full")
-st.title("🛡️ Matrix V13.8.1 - Hybrid Shield (Full History)")
+    # D. Hạ dàn 39 (Ưu tiên Vùng xanh A23-T1, Bỏ Shield)
+    da_59['vung_xanh'] = ((da_59['An'].isin([2, 3])) & (da_59['Tang'] == 1)).astype(int)
+    dk_39 = da_59.sort_values(by=['vung_xanh', 'Điểm'], ascending=[False, False]).head(39)
+    
+    return dk_39, da_59, ds_79, sorted(list(set_bottom)), sorted(list(set_bet)), df_raw, (t2, b4), base_88
+
+# --- 3. UI (GIỮ NGUYÊN HIỂN THỊ BẢN CŨ) ---
+st.set_page_config(layout="wide", page_title="Matrix Hybrid V13.9.2")
+st.title("🛡️ Matrix V13.9.2 - Hybrid Shield (88-Base)")
 
 if 'cfg' not in st.session_state: st.session_state['cfg'] = {"tier": 68, "win": 10, "hard": 7.99, "bot": 40, "bet": 40}
 if 'db' not in st.session_state: st.session_state['db'] = {}
@@ -157,7 +152,6 @@ with st.sidebar:
             p = st.session_state.get('prev_sets', {})
             check = lambda d: "A" if gdb_num in (d or []) else "T"
             
-            # Kiểm tra riêng 6 Chạm (A nếu dính chạm hoặc là kép bằng)
             c6 = p.get('c6_str', "")
             is_hit_6 = any(d in gdb_num for d in c6) or (gdb_num[0] == gdb_num[1])
             res_6t = "A" if is_hit_6 else "T"
@@ -165,8 +159,7 @@ with st.sidebar:
             st.session_state['history'].insert(0, {
                 "STT": len(st.session_state['history']) + 1, "GĐB": gdb_val,
                 "Dan39": check(p.get('d39')), "Dan59": check(p.get('d59')), "Dan79": check(p.get('d79')),
-                "180thap": check(p.get('dthap')), "180cao": check(p.get('dcao')),
-                "6-Touch": p.get('c6_str', ""), "KQ_6": res_6t
+                "88-Base": res_6t
             })
             update_matrix_state(st.session_state['db'], [n[-2:] for n in raw_list[:27]], mapping)
             st.session_state['last_full_str'] = "".join(raw_list[:27]); st.rerun()
@@ -178,58 +171,54 @@ with st.sidebar:
     st.header("⚙️ 4. BỘ LỌC")
     st.session_state['cfg']['tier'] = st.slider("Tầng (%):", 50, 80, 68)
     st.session_state['cfg']['win'] = st.slider("Kỳ:", 5, 20, 10)
-    st.session_state['cfg']['bot'] = st.slider("Đáy:", 0, 350, 40)
-    st.session_state['cfg']['bet'] = st.slider("Bệt:", 0, 350, 40)
+    st.session_state['cfg']['bot'] = st.slider("Đáy:", 0, 100, 40)
+    st.session_state['cfg']['bet'] = st.slider("Bệt:", 0, 100, 40)
 
-# --- 5. HIỂN THỊ ---
+# --- 4. HIỂN THỊ (TRẢ LẠI GIAO DIỆN BẢN CŨ) ---
 if st.session_state['last_full_str']:
     def get_matrix_df(t_val, w_val):
         db, mapping = st.session_state['db'], get_mapping_v11(st.session_state['last_full_str'])
-        stats = {f"{i:02d}": {"total_score": 0.0, "max_an": 0, "clean_wire_count": 0, "clean_window_hits": 0, "all_losses": []} for i in range(100)}
+        stats = {f"{i:02d}": {"total_score": 0.0, "max_an": 0, "clean_wire_count": 0, "hits": 0, "losses": []} for i in range(100)}
         for w_id, w_d in db.items():
             num = mapping.get(str(w_id))
             if num:
                 s = stats[num]; sw, sl = int(w_d.get("streak_win", 0)), int(w_d.get("streak_loss", 0))
-                s["all_losses"].append(sl if sw == 0 else 0); s["max_an"] = max(s["max_an"], sw)
-                s["clean_window_hits"] += sum(w_d.get("hit_history", [])[-w_val:])
+                s["losses"].append(sl if sw == 0 else 0); s["max_an"] = max(s["max_an"], sw)
+                s["hits"] += sum(w_d.get("hit_history", [])[-w_val:])
                 if sw == 0: s["clean_wire_count"] += 1; s["total_score"] += float(w_d.get("score", 1000.0))
         res = []
         for num, s in stats.items():
-            dc = max(1, s["clean_wire_count"]); hard = round((s["clean_window_hits"] / (w_val * (11449/100))) * 100, 2)
+            dc = max(1, s["clean_wire_count"]); hard = round((s["hits"] / (w_val * (11449/100))) * 100, 2)
             score = round((s["total_score"] / dc) * (1 + hard/100), 2)
-            res.append({"Số": num, "Điểm": score, "Tang": calculate_tier(s["all_losses"], t_val), "An": s["max_an"], "Cứng": hard})
+            res.append({"Số": num, "Điểm": score, "Tang": calculate_tier(s["losses"], t_val), "An": s["max_an"], "Cứng": hard})
         df = pd.DataFrame(res).sort_values("Điểm", ascending=False).reset_index(drop=True); df["Rank"] = df.index + 1; return df
 
     df_raw_val = get_matrix_df(st.session_state['cfg']['tier'], st.session_state['cfg']['win'])
-    dk, da, ds, d_thap, d_cao, df_full, (t2, b4) = thermal_ai_engines_v138(df_raw_val, st.session_state['history'], st.session_state['db'], get_mapping_v11(st.session_state['last_full_str']), st.session_state['cfg'])
+    dk, da, ds, d_thap, d_cao, df_full, (t2, b4), b88 = thermal_ai_engines_v1392(df_raw_val, st.session_state['history'], st.session_state['db'], get_mapping_v11(st.session_state['last_full_str']), st.session_state['cfg'])
     
-    # Lưu bộ đệm để chốt kỳ sau
-    st.session_state['prev_sets'] = {
-        'd39': dk["Số"].tolist(), 'd59': da["Số"].tolist(), 'd79': ds["Số"].tolist(), 
-        'dthap': d_thap, 'dcao': d_cao, 'c6_str': "".join(t2 + b4)
-    }
+    st.session_state['prev_sets'] = {'d39': dk["Số"].tolist(), 'd59': da["Số"].tolist(), 'd79': ds["Số"].tolist(), 'c6_str': "".join(t2 + b4)}
 
     # METRIC TRÊN ĐẦU
     st.markdown("---")
     m1, m2, m3 = st.columns(3)
     m1.metric("🔝 2 CHẠM MẠNH", ",".join(t2))
     m2.metric("📉 4 CHẠM YẾU", ",".join(b4))
-    m3.info("Hybrid V13.8.1: Lõi + Phạt quân ngoài 6 chạm")
+    m3.info("Hybrid V13.9.2: Gốc 88s + Gọt tỉa Sát thủ")
 
     c1, c2, c3 = st.columns(3)
-    c1.success(f"🎯 Kết 39 ({len(dk)})"); c1.code(", ".join(dk["Số"].tolist()))
-    c2.info(f"🤖 AI 59 ({len(da)})"); c2.code(", ".join(da["Số"].tolist()))
-    c3.warning(f"🛡️ Safe 79 ({len(ds)})"); c3.code(", ".join(ds["Số"].tolist()))
+    c1.success(f"🎯 Kết 39 (Vùng Xanh)"); c1.code(", ".join(dk["Số"].tolist()))
+    c2.info(f"🤖 AI 59 (Shield)"); c2.code(", ".join(da["Số"].tolist()))
+    c3.warning(f"🛡️ Safe 79 (88-Base)"); c3.code(", ".join(ds["Số"].tolist()))
 
     st.divider()
     t_hist, t_rank = st.tabs(["📜 LỊCH SỬ ĂN/TRƯỢT", "📊 CHI TIẾT RANK"])
     with t_hist:
         if st.session_state['history']:
             df_hist = pd.DataFrame(st.session_state['history'])
-            # Đảm bảo hiển thị đúng thứ tự cột mày muốn
-            cols = ["STT", "GĐB", "Dan39", "Dan59", "Dan79", "180thap", "180cao", "6-Touch", "KQ_6"]
+            # Trả lại các cột lịch sử cũ nhưng có thêm cột 88-Base để mày soi 6 chạm
+            cols = ["STT", "GĐB", "Dan39", "Dan59", "Dan79", "88-Base"]
             st.dataframe(df_hist.reindex(columns=cols), use_container_width=True, hide_index=True)
     with t_rank:
         st.dataframe(df_full.sort_values(by=['safety_score_79', 'Điểm'], ascending=[False, False]), use_container_width=True)
 
-    st.download_button("💾 LƯU JSON", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_full_v1381.json", use_container_width=True)
+    st.download_button("💾 LƯU JSON", data=json.dumps({"matrix": st.session_state['db'], "history": st.session_state['history'], "last_full_str": st.session_state['last_full_str']}, ensure_ascii=False), file_name="matrix_full_v1392.json", use_container_width=True)
